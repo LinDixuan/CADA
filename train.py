@@ -1,6 +1,6 @@
 import argparse
 import os
-import ruamel.yaml as yaml
+import yaml
 import numpy as np
 import random
 import time
@@ -25,9 +25,9 @@ def train(model, data_loader, optimizer, epoch, device, config):
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.8f}'))
-    metric_logger.add_meter('loss_itc', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
-    metric_logger.add_meter('loss_itm', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
-    metric_logger.add_meter('loss_cap', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
+    metric_logger.add_meter('loss_glb', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
+    metric_logger.add_meter('loss_loc', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
+    metric_logger.add_meter('loss_ara', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
 
     header = 'Train Epoch: [{}]'.format(epoch)#
     print_freq = 100
@@ -36,16 +36,19 @@ def train(model, data_loader, optimizer, epoch, device, config):
         image = image.to(device,non_blocking=True)
         img_pid = img_pid.to(device,non_blocking=True)
 
-        loss_itc,loss_itm, loss_cap= model(image, caption, idx=img_pid)
-        loss = loss_itc + loss_itm + loss_cap
+        loss_glb, loss_loc, loss_ara= model(image, caption, idx=img_pid)
+        loss_glb = loss_glb * 1.
+        loss_loc = loss_loc * 1.
+        loss_ara = loss_ara * 0.1
+        loss = loss_glb + loss_loc + loss_ara
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        metric_logger.update(loss_itm=loss_itm.item())
-        metric_logger.update(loss_cap=loss_cap.item())
-        metric_logger.update(loss_itc=loss_itc.item())
+        metric_logger.update(loss_loc=loss_loc.item())
+        metric_logger.update(loss_glb=loss_glb.item())
+        metric_logger.update(loss_ara=loss_ara.item())
         metric_logger.update(lr=optimizer.param_groups[0]['lr'])
 
     # gather the stats from all processes
@@ -54,8 +57,7 @@ def train(model, data_loader, optimizer, epoch, device, config):
     return {k: "{:.8f}".format(meter.global_avg) for k, meter in metric_logger.meters.items()}
 
 @torch.no_grad()
-def evaluation(model, data_loader, device, config, mode,itm=False):
-    assert mode in ['i2t', 't2i', 'both']
+def evaluation(model, data_loader, device, config, itm=False):
     # test
     model.eval()
 
@@ -100,60 +102,37 @@ def evaluation(model, data_loader, device, config, mode,itm=False):
     image_feats = torch.cat(image_feats, dim=0)
     image_embeds = torch.cat(image_embeds, dim=0)
 
-    sims_matrix = image_embeds @ text_embeds.t()  # img_len * text_len
-    #score_matrix_i2t = torch.full((len(data_loader.dataset.image), len(texts)), -100.0).to(device)
-    score_matrix_i2t = sims_matrix.clone()
+    sims_matrix = text_embeds @ image_embeds.t()
+
     num_tasks = utils.get_world_size()
     rank = utils.get_rank()
 
-    if mode in ['i2t', 'both']:
-        step = sims_matrix.size(0) // num_tasks + 1  # step for each machine
-        start = rank * step
-        end = min(sims_matrix.size(0), start + step)
+    score_matrix_t2i = torch.full((len(texts), len(data_loader.dataset.image)), -100.0).to(device)
 
-        for i, sims in enumerate(metric_logger.log_every(sims_matrix[start:end], 100, header)):
+    step = sims_matrix.size(0) // num_tasks + 1
+    start = rank * step
+    end = min(sims_matrix.size(0), start + step)
+
+    for i, sims in enumerate(metric_logger.log_every(sims_matrix[start:end], 500, header)):
+        if itm == True:
             topk_sim, topk_idx = sims.topk(k=config['k_test'], dim=0)
-
-            encoder_output = image_feats[start + i].repeat(config['k_test'], 1, 1).to(device)
+            encoder_output = image_feats[topk_idx.cpu()].to(device)
+            bs = encoder_output.shape[0]
             encoder_att = torch.ones(encoder_output.size()[:-1], dtype=torch.long).to(device)
-            output = model.text_encoder(text_ids[topk_idx],
-                                        attention_mask=text_atts[topk_idx],
+            output = model.text_encoder(text_ids[start + i].repeat(config['k_test'], 1),
+                                        attention_mask=text_atts[start + i].repeat(config['k_test'], 1),
                                         encoder_hidden_states=encoder_output,
                                         encoder_attention_mask=encoder_att,
                                         return_dict=True,
                                         )
+
             score = model.itm_head(output.last_hidden_state[:, 0, :])[:, 1]
-            score_matrix_i2t[start + i, topk_idx] = score + topk_sim
 
-    sims_matrix = sims_matrix.t()
-    score_matrix_t2i = torch.full((len(texts), len(data_loader.dataset.image)), -100.0).to(device)
+            score_matrix_t2i[start + i, topk_idx] = score
 
-    if mode in ['t2i','both']:
-        step = sims_matrix.size(0) // num_tasks + 1
-        start = rank * step
-        end = min(sims_matrix.size(0), start + step)
-
-        for i, sims in enumerate(metric_logger.log_every(sims_matrix[start:end], 500, header)):
-            if itm==True:
-                topk_sim, topk_idx = sims.topk(k=config['k_test'], dim=0)
-                encoder_output = image_feats[topk_idx.cpu()].to(device)
-                bs = encoder_output.shape[0]
-                encoder_att = torch.ones(encoder_output.size()[:-1], dtype=torch.long).to(device)
-                output = model.text_encoder(text_ids[start + i].repeat(config['k_test'], 1),
-                                            attention_mask=text_atts[start + i].repeat(config['k_test'], 1),
-                                            encoder_hidden_states=encoder_output,
-                                            encoder_attention_mask=encoder_att,
-                                            return_dict=True,
-                                            )
-
-                score = model.itm_head(output.last_hidden_state[:, 0, :])[:, 1]
-
-                # score = model.itm_head(output.last_hidden_state[:bs])[:, 1]
-                score_matrix_t2i[start + i, topk_idx] =  score
 
     if args.distributed:
         dist.barrier()
-        torch.distributed.all_reduce(score_matrix_i2t, op=torch.distributed.ReduceOp.SUM)
         torch.distributed.all_reduce(score_matrix_t2i, op=torch.distributed.ReduceOp.SUM)
     score_matrix_t2i = score_matrix_t2i + sims_matrix
 
@@ -161,77 +140,45 @@ def evaluation(model, data_loader, device, config, mode,itm=False):
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Evaluation time {}'.format(total_time_str))
 
-    return score_matrix_i2t.cpu().numpy(), score_matrix_t2i.cpu().numpy()
+    return score_matrix_t2i.cpu().numpy()
 
 
 @torch.no_grad()
-def itm_eval(scores_i2t, scores_t2i, txt2img, img2txt, img2pid, txt2pid,mode='both'):  # txt2img: corresponding id
+def itm_eval(scores_t2i, txt2img, img2txt, img2pid, txt2pid):  # txt2img: corresponding id
 
-    assert mode in ['i2t','t2i','both']
     img2pid = np.asarray(img2pid)
     txt2pid = np.asarray(txt2pid)
-    if mode in ['i2t','both']:
-        # Images->Text
-        ranks = np.zeros(scores_i2t.shape[0])  # img_num
-        for index, score in enumerate(scores_i2t):
-            inds = np.argsort(score)[::-1]  # from highest to lowest
-            # Score
-            rank = 1e20
-            for i in img2txt[index]:
-                tmp = np.where(inds == i)[0][0]  # position
-                if tmp < rank:
-                    rank = tmp  # for each image find the highest rank from all corresponding text
-            ranks[index] = rank
 
-        # Compute metrics
-        tr1 = 100.0 * len(np.where(ranks < 1)[0]) / len(ranks)
-        tr5 = 100.0 * len(np.where(ranks < 5)[0]) / len(ranks)
-        tr10 = 100.0 * len(np.where(ranks < 10)[0]) / len(ranks)
+    ranks = np.zeros(scores_t2i.shape[0])
 
-    if mode in ['t2i','both']:
-        # Text->Images
-        ranks = np.zeros(scores_t2i.shape[0])
+    for index, score in enumerate(scores_t2i):
+        inds = np.argsort(score)[::-1]
+        rank = 1e20
+        for i in txt2img[index]:
+            tmp = np.where(inds == i)[0][0]  # position
+            if tmp < rank:
+                rank = tmp  # for each text find the highest rank from all corresponding image
+        ranks[index] = rank
 
-        for index, score in enumerate(scores_t2i):
-            inds = np.argsort(score)[::-1]
-            rank = 1e20
-            for i in txt2img[index]:
-                tmp = np.where(inds == i)[0][0]  # position
-                if tmp < rank:
-                    rank = tmp  # for each text find the highest rank from all corresponding image
-            ranks[index] = rank
+    # =====rank=====
+    indices = np.argsort(-scores_t2i, axis=1)
+    pred_labels = img2pid[indices]
+    matches = np.equal(txt2pid.reshape(-1, 1), pred_labels)
 
-        #=====rank=====
-        indices = np.argsort(-scores_t2i,axis=1)
-        pred_labels = img2pid[indices]
-        matches = np.equal(txt2pid.reshape(-1,1),pred_labels)
+    num_rel = matches.sum(1)  # q
+    tmp_cmc = matches.cumsum(1)  # q * k
 
-        num_rel = matches.sum(1)  # q
-        tmp_cmc = matches.cumsum(1)  # q * k
+    tmp_cmc = [tmp_cmc[:, i] / (i + 1.0) for i in range(tmp_cmc.shape[1])]
+    tmp_cmc = np.stack(tmp_cmc, 1) * matches
+    AP = tmp_cmc.sum(1) / num_rel  # q
+    mAP = AP.mean() * 100
+    # ==============
 
+    # Compute metrics
+    ir1 = 100.0 * len(np.where(ranks < 1)[0]) / len(ranks)
+    ir5 = 100.0 * len(np.where(ranks < 5)[0]) / len(ranks)
+    ir10 = 100.0 * len(np.where(ranks < 10)[0]) / len(ranks)
 
-        tmp_cmc = [tmp_cmc[:, i] / (i + 1.0) for i in range(tmp_cmc.shape[1])]
-        tmp_cmc = np.stack(tmp_cmc, 1) * matches
-        AP = tmp_cmc.sum(1) / num_rel  # q
-        mAP = AP.mean() * 100
-        #==============
-
-        # Compute metrics
-        ir1 = 100.0 * len(np.where(ranks < 1)[0]) / len(ranks)
-        ir5 = 100.0 * len(np.where(ranks < 5)[0]) / len(ranks)
-        ir10 = 100.0 * len(np.where(ranks < 10)[0]) / len(ranks)
-
-    if mode == 'i2r':
-        ir1 = 0
-        ir5 = 0
-        ir10 = 0
-
-    if mode == 't2i':
-        tr1 = 0
-        tr5 = 0
-        tr10 = 0
-
-    tr_mean = (tr1 + tr5 + tr10) / 3
     ir_mean = (ir1 + ir5 + ir10) / 3
     r_mean = ir_mean+mAP
 
@@ -321,34 +268,43 @@ def main(args, config):
             cosine_lr_schedule(optimizer, epoch, config['max_epoch'], config['init_lr'], config['min_lr'])
 
             train_stats = train(model, train_loader, optimizer, epoch, device, config)
-
-
-        score_val_i2t, score_val_t2i, = evaluation(model_without_ddp, val_loader, device, config, mode='t2i',itm=True)
-        score_val_i2ta, score_val_itc = evaluation(model_without_ddp, val_loader, device, config, mode='t2i',itm=False)
+        if epoch % epoch_eval != 0:
+            continue
+        score_test_t2i = evaluation(model_without_ddp, test_loader, device, config, itm=True)
+        score_val_t2i = evaluation(model_without_ddp, val_loader, device, config, itm=True)
+        score_val_glb = evaluation(model_without_ddp, val_loader, device, config, itm=False)
 
         if epoch == config['max_epoch'] - 1 or args.evaluate:
 
-            score_test_i2t, score_test_t2i = evaluation(model_without_ddp, test_loader, device, config, mode='t2i',itm=True)
-            score_test_itc_i2t, score_test_itc_t2i = evaluation(model_without_ddp, test_loader, device, config, mode='t2i',itm=False)
+            score_test_glb_t2i = evaluation(model_without_ddp, test_loader, device, config,itm=False)
 
-            test_result = itm_eval(score_test_i2t, score_test_t2i, test_loader.dataset.txt2img,
+            test_result = itm_eval(score_test_t2i, test_loader.dataset.txt2img,
                                    test_loader.dataset.img2txt, test_loader.dataset.img2pid,
-                                   test_loader.dataset.txt2pid, mode='t2i')
-            test_itc_result = itm_eval(score_test_itc_i2t, score_test_itc_t2i, test_loader.dataset.txt2img,
+                                   test_loader.dataset.txt2pid)
+            test_glb_result = itm_eval(score_test_glb_i2t, score_test_glb_t2i, test_loader.dataset.txt2img,
                                        test_loader.dataset.img2txt, test_loader.dataset.img2pid,
-                                       test_loader.dataset.txt2pid, mode='t2i')
+                                       test_loader.dataset.txt2pid)
             print(test_result)
-            print(test_itc_result)
+            print(test_glb_result)
+            log_stats = {
+                **{f'test_{k}': v for k, v in test_result.items()},
+                **{f'test_glb_{k}': v for k, v in test_glb_result.items()},
+            }
+            with open(os.path.join(args.output_dir, "evaluate.txt"), "a") as f:
+                f.write(json.dumps(log_stats) + "\n")
 
 
         if utils.is_main_process():
-
-            val_result = itm_eval(score_val_i2t, score_val_t2i,val_loader.dataset.txt2img,val_loader.dataset.img2txt,
-                                  val_loader.dataset.img2pid,val_loader.dataset.txt2pid,mode='t2i')
-            val_itc_result = itm_eval(score_val_i2ta, score_val_itc,val_loader.dataset.txt2img,val_loader.dataset.img2txt,
-                                      val_loader.dataset.img2pid,val_loader.dataset.txt2pid,mode='t2i')
+            test_result = itm_eval(score_test_t2i, test_loader.dataset.txt2img,
+                                   test_loader.dataset.img2txt, test_loader.dataset.img2pid,
+                                   test_loader.dataset.txt2pid)
+            val_result = itm_eval(score_val_t2i,val_loader.dataset.txt2img,val_loader.dataset.img2txt,
+                                  val_loader.dataset.img2pid,val_loader.dataset.txt2pid)
+            val_glb_result = itm_eval(score_val_glb,val_loader.dataset.txt2img,val_loader.dataset.img2txt,
+                                      val_loader.dataset.img2pid,val_loader.dataset.txt2pid)
+            print("test",test_result)
             print("val",val_result)
-            print("itc",val_itc_result)
+            print("glb",val_glb_result)
 
 
 
@@ -365,28 +321,13 @@ def main(args, config):
                 best_epoch = epoch
 
 
-            if args.evaluate:
+            if not args.evaluate:
 
-                test_result = itm_eval(score_test_i2t, score_test_t2i, test_loader.dataset.txt2img,
-                                       test_loader.dataset.img2txt, test_loader.dataset.img2pid,
-                                       test_loader.dataset.txt2pid, mode='t2i')
-                test_itc_result = itm_eval(score_test_itc_i2t, score_test_itc_t2i, test_loader.dataset.txt2img,
-                                                       test_loader.dataset.img2txt, test_loader.dataset.img2pid,
-                                                       test_loader.dataset.txt2pid, mode='t2i')
-                print(test_result)
-                print(test_itc_result)
-                log_stats = {
-                             **{f'test_{k}': v for k, v in test_result.items()},
-                             **{f'test_itc_{k}': v for k, v in test_itc_result.items()},
-                            }
-                with open(os.path.join(args.output_dir, "evaluate.txt"),"a") as f:
-                    f.write(json.dumps(log_stats) + "\n")
-            else:
                 if epoch == config['max_epoch'] - 1:
                     log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                                 **{f'val_{k}': v for k, v in val_result.items()},
                                 **{f'test_{k}': v for k, v in test_result.items()},
-                                 **{f'test_itc_{k}': v for k, v in test_itc_result.items()},
+                                 **{f'test_glb_{k}': v for k, v in test_glb_result.items()},
                                 'epoch': epoch,
                                 'best_epoch': best_epoch,
                                 }
@@ -427,7 +368,7 @@ if __name__ == '__main__':
     parser.add_argument('--epoch_eval',default=1,type=int)
     parser.add_argument('--load_head',action='store_true')
     parser.add_argument('--k_test',default=32,type=int)
-    parser.add_argument('--pretrained',default='./checkpoint/model_base_retrieval_coco.pth')
+    parser.add_argument('--pretrained',default='./checkpoint/model_base.pth')
     args = parser.parse_args()
 
     config = yaml.load(open(args.config, 'r'), Loader=yaml.Loader)
@@ -440,7 +381,6 @@ if __name__ == '__main__':
         config['batch_size_test'] = args.batch_size_test
 
     config['init_lr'] = args.init_lr
-    config['queue_size'] = args.queue_size
     if args.evaluate:
         config['pretrained'] = args.pretrained
     config['k_test'] = args.k_test

@@ -1,9 +1,9 @@
-image_root: '../datasets/RSTPReid/imgs'
+image_root: 'datasets/RSTPReid/imgs'
 ann_root: 'annotation'
 dataset: 'retrieval_rstp'
 
 # set pretrained as a file path or an url
-pretrained: '../checkpoint/model_base.pth'
+pretrained: 'checkpoint/model_base.pth'
 
 # size of vit model; base or large
 

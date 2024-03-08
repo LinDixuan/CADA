@@ -2,7 +2,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 from models.vit import VisionTransformer, interpolate_pos_embed
-from models.med import BertConfig, BertModel, BertLMHeadModel, BertMLMLMHeadModel, BertJigSawModel
+from models.med import BertConfig, BertModel, BertMLMLMHeadModel
 from models.blip import create_vit, init_tokenizer
 from models.clip_models import mlm_model,GELU
 from collections import OrderedDict
@@ -14,7 +14,7 @@ import os
 import nltk
 import math
 
-class BLIP_CLIP(nn.Module):
+class CADA(nn.Module):
     def __init__(self,
                  med_config='configs/med_config.json',
                  image_size=224,
@@ -30,7 +30,7 @@ class BLIP_CLIP(nn.Module):
             vit (str): model size of vision transformer
         """
         super().__init__()
-        self.task = ['itc','itm','seg','attr']
+        self.task = ['global','local','seg','attr']
 
         self.num_classes = num_classes
         self.logit_scale = torch.ones([]) * (1 / 0.02)
@@ -42,7 +42,7 @@ class BLIP_CLIP(nn.Module):
         med_config.encoder_width = vision_width
         self.config=med_config
         self.text_encoder = BertModel(config=med_config, add_pooling_layer=False)
-        if 'itm' not in self.task:
+        if 'local' not in self.task:
             for k, v in self.text_encoder.named_parameters():
                 if 'cross' in k:
                     v.requires_grad = False
@@ -50,23 +50,11 @@ class BLIP_CLIP(nn.Module):
 
         self.vision_proj = nn.Linear(vision_width, self.embed_dim)
         self.text_proj = nn.Linear(text_width, self.embed_dim)
-        if 'itm' in self.task:
+        if 'local' in self.task:
             self.itm_head = nn.Linear(text_width, 2)
-        if 'seg' in self.task:
             self.itm_local_head = nn.Linear(text_width, 2)
-        if  'lm' in self.task or 'attr' in self.task:
+        if 'attr' in self.task:
             self.text_decoder = BertMLMLMHeadModel(config=med_config)
-        elif 'mlm' in self.task:
-            self.mlm_head = nn.Sequential(
-                OrderedDict([('dense', nn.Linear(vision_width, vision_width)),
-                             ('gelu', GELU()),
-                             ('ln', nn.LayerNorm(vision_width)),
-                             ('fc', nn.Linear(vision_width, med_config.vocab_size))]))
-            scale = vision_width ** -0.5
-            proj_std = scale * (12 ** -0.5)
-            fc_std = (2 * text_width) ** -0.5
-            nn.init.normal_(self.mlm_head.dense.weight, std=fc_std)
-            nn.init.normal_(self.mlm_head.fc.weight, std=proj_std)
 
     def forward(self, image, caption, idx):
 
@@ -83,51 +71,48 @@ class BLIP_CLIP(nn.Module):
 
         tokens = [self.tokenizer.tokenize(cap) for cap in caption]
 
-        if 'itc' in self.task:
-            itc_loss = self.compute_itc_loss(image_feats,text_feats,idx,intra=False,world=True)
-        if 'itm' in self.task:
-            itm_loss = self.compute_itm_loss(image_embeds,text,image_feats,text_feats,idx,tokens)
+        if 'global' in self.task:
+            global_loss = self.ndf_loss(image_feats,text_feats,idx,intra=False,world=True)
+        if 'local' in self.task:
+            local_loss = self.itm_loss(image_embeds,text,image_feats,text_feats,idx,tokens)
 
-        if 'mlm' in self.task or 'lm' in self.task or 'attr' in self.task:
-            cap_loss = self.compute_mlmlm_loss(text,tokens,image_embeds,'attr')
+        if 'attr' in self.task:
+            ara_loss = self.ara_loss(text,tokens,image_embeds)
 
-        return itc_loss, itm_loss,cap_loss
+        return global_loss, local_loss, ara_loss
 
 
-    def compute_itc_loss(self,image_feats, text_feats, labels, intra=False, world=False):
+    def ndf_loss(self,image_feats, text_feats, labels, intra=False, world=False):
         if world:
             image_feats = all_gather_with_grad(image_feats)
             text_feats = all_gather_with_grad(text_feats)
             labels = concat_all_gather(labels)
         bs = image_feats.shape[0]
-
+        epsilon = 1e-8
         labels = labels.view(-1,bs)
         labels = torch.eq(labels, labels.t()).float()
+        labels = labels / labels.sum(dim=1)
 
         # normalized features
         image_norm = image_feats / image_feats.norm(dim=-1, keepdim=True)
         text_norm = text_feats / text_feats.norm(dim=-1, keepdim=True)
 
         # cosine similarity as logits
-        logits_per_image = self.logit_scale * image_norm @ text_norm.t() #bs*5 x bs
+        logits_per_image = self.logit_scale * image_norm @ text_norm.t() #bs x bs
 
         logits_per_text = logits_per_image.t()
 
-        loss_i = F.cross_entropy(logits_per_image, labels)
-        loss_t = F.cross_entropy(logits_per_text, labels)
-        loss = (loss_i + loss_t) / 2
+        loss_i = F.softmax(logits_per_image,dim=1) * (F.log_softmax(logits_per_image, dim=1) - torch.log(labels + epsilon)) + \
+                 labels * (torch.log(labels + epsilon) - F.log_softmax(logits_per_image, dim=1))
+        loss_t = F.softmax(logits_per_text,dim=1) * (F.log_softmax(logits_per_text, dim=1) - torch.log(labels + epsilon)) + \
+                 labels * (torch.log(labels + epsilon) - F.log_softmax(logits_per_text, dim=1))
+        loss = (loss_i.mean() + loss_t.mean()) / 2
 
-        if intra:
-            intra_image = logit_scale * image_norm @ image_norm.t()
-            intra_text = logit_scale * text_norm @ text_norm.t()
-            loss_ii = F.cross_entropy(intra_image,labels)
-            loss_tt = F.cross_entropy(intra_text,labels)
-            loss = (loss + loss_ii + loss_tt) / 2
 
         return loss
 
 
-    def compute_itm_loss(self,image_embeds, text, image_feat, text_feat, idx,tokens):
+    def itm_loss(self,image_embeds, text, image_feat, text_feat, idx,tokens):
 
         idx = idx.view(-1,1)
         idxs = concat_all_gather(idx)
@@ -196,199 +181,59 @@ class BLIP_CLIP(nn.Module):
                                        return_dict=True,
                                        )
 
-        if 'seg' in self.task:
-            last_hid = output_pos.last_hidden_state[:,1:,:]
-            pos_segments = [last_hid[:, :36], last_hid[:,36:72]]
-            pos_segments = torch.cat(pos_segments,dim=0)
-            pos_segments = torch.mean(pos_segments,dim=1)
+        last_hid = output_pos.last_hidden_state[:, 1:, :]
+        pos_segments = [last_hid[:, :36], last_hid[:, 36:72]]
+        pos_segments = torch.cat(pos_segments, dim=0)
+        pos_segments = torch.mean(pos_segments, dim=1)
 
-            last_hid = output_neg.last_hidden_state[:,1:,:]
-            neg_segments = [last_hid[:, :36], last_hid[:,36:72]]
-            neg_segments = torch.cat(neg_segments, dim=0)
-            neg_segments = torch.mean(neg_segments,dim=1)
+        last_hid = output_neg.last_hidden_state[:, 1:, :]
+        neg_segments = [last_hid[:, :36], last_hid[:, 36:72]]
+        neg_segments = torch.cat(neg_segments, dim=0)
+        neg_segments = torch.mean(neg_segments, dim=1)
 
-            vl_embeddings = torch.cat([output_pos.last_hidden_state[:, 0, :], output_neg.last_hidden_state[:, 0, :]],
-                                      dim=0)  # multi-feat
-            vl_output = self.itm_head(vl_embeddings)  # (bs*3) * 2
+        vl_embeddings = torch.cat([output_pos.last_hidden_state[:, 0, :], output_neg.last_hidden_state[:, 0, :]],
+                                  dim=0)  # multi-feat
+        vl_output = self.itm_head(vl_embeddings)  # (bs*3) * 2
 
-            itm_labels = torch.cat([torch.ones(bs, dtype=torch.long), torch.zeros(2 * bs, dtype=torch.long)],
-                                   dim=0).to(image_embeds.device)  # (bs * 3)
+        itm_labels = torch.cat([torch.ones(bs, dtype=torch.long), torch.zeros(2 * bs, dtype=torch.long)],
+                               dim=0).to(image_embeds.device)  # (bs * 3)
 
-            lc_embeddings = torch.cat([pos_segments,neg_segments],dim=0)
-            lc_labels = torch.cat([torch.ones(2*bs, dtype=torch.long), torch.zeros(4 * bs, dtype=torch.long)],
-                                   dim=0).to(image_embeds.device)
-            lc_output = self.itm_local_head(lc_embeddings)
-            loss_lc = F.cross_entropy(lc_output,lc_labels)
-            loss = F.cross_entropy(vl_output, itm_labels) + loss_lc #+ loss_gl
+        lc_embeddings = torch.cat([pos_segments, neg_segments], dim=0)
+        lc_labels = torch.cat([torch.ones(2 * bs, dtype=torch.long), torch.zeros(4 * bs, dtype=torch.long)],
+                              dim=0).to(image_embeds.device)
+        lc_output = self.itm_local_head(lc_embeddings)
+        loss_lc = F.cross_entropy(lc_output, lc_labels)
+        loss = F.cross_entropy(vl_output, itm_labels) + loss_lc
 
-        else:
-            vl_embeddings = torch.cat([output_pos.last_hidden_state[:, 0, :], output_neg.last_hidden_state[:, 0, :]],
-                                      dim=0)  # multi-feat
-            vl_output = self.itm_head(vl_embeddings)  # (bs*3) * 2
-
-            itm_labels = torch.cat([torch.ones(bs, dtype=torch.long), torch.zeros(2 * bs, dtype=torch.long)],
-                                   dim=0).to(image_embeds.device)  # (bs * 3)
-            loss = F.cross_entropy(vl_output, itm_labels)
         return loss
 
 
-    def compute_irr_loss(self,text,image_embeds,tokens):
-        input_ids = text.input_ids.clone()
-        input_ids[:, 0] = self.tokenizer.bos_token_id
-        labels = input_ids.clone()
-        image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(image_embeds.device)
+    def ara_loss(self,text,token,image_embeds):
 
-        mlm_probability = 0.15
-
-        probability_matrix = torch.full(labels.shape, mlm_probability)
-        """mlm_input_ids, mlm_labels = self.mask_irr(input_ids, vocab_size=self.config.vocab_size,device=image_embeds.device,
-                                      targets=labels, probability_matrix=probability_matrix)"""
-        """mlm_input_ids, mlm_labels = self.attr_mask(input_ids, tokens,
-                                                  targets=labels, probability_matrix=probability_matrix)"""
-        mlm_input_ids, mlm_labels = self.mask(input_ids, self.config.vocab_size,image_embeds.device,
-                                                   targets=labels, probability_matrix=probability_matrix)
-        mlm_embeds = self.text_encoder(mlm_input_ids,
-                                       attention_mask=text.attention_mask,
-                                       encoder_hidden_states=image_embeds,
-                                       encoder_attention_mask=image_atts,
-                                       return_dict=True).last_hidden_state
-        dim = mlm_embeds.shape[-1]
-        score = self.mlm_head(mlm_embeds.reshape(-1,dim))
-        loss = F.cross_entropy(score,mlm_labels.reshape(-1))
-        return loss
-
-
-    def compute_mlmlm_loss(self,text,token,image_embeds,task='mlm'):
-        assert task in ['lm','mlm','mlmlm','ngram','attr']
         loss = 0.
         image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(image_embeds.device)
-        if task == 'ngram':
-            input_ids = text.input_ids.clone()
-            input_ids[:, 0] = self.tokenizer.bos_token_id
-            labels = input_ids.clone()
-            mlm_probability = 0.2
 
-            probability_matrix = torch.full(labels.shape, mlm_probability)
-            input_ids, labels = self.N_gram_mask(input_ids, targets=labels, probability_matrix=probability_matrix)
-            decoder_output_mlm = self.text_decoder(input_ids,
-                                                   attention_mask=text.attention_mask,
-                                                   encoder_hidden_states=image_embeds,
-                                                   encoder_attention_mask=image_atts,
-                                                   labels=labels,
-                                                   return_dict=True,
-                                                   output_hidden_states=True,
-                                                   task='mlm'
-                                                   )
-            loss += decoder_output_mlm.loss
+        mask_input_ids = text.input_ids.clone()
+        mask_labels = mask_input_ids.clone()
+        mask_probability = 0.4
 
+        probability_matrix = torch.full(mask_labels.shape, mask_probability)
+        mask_input_ids, mask_labels = self.attr_mask(mask_input_ids, token,
+                                                   targets=mask_labels, probability_matrix=probability_matrix)
 
-        if task in ['lm','mlmlm']:
-            lm_input_ids = text.input_ids.clone()
-            lm_input_ids[:, 0] = self.tokenizer.bos_token_id
-            lm_labels = lm_input_ids.masked_fill(lm_input_ids == self.tokenizer.pad_token_id, -100)
+        decoder_output_mlm = self.text_decoder(mask_input_ids,
+                                               attention_mask=text.attention_mask,
+                                               encoder_hidden_states=image_embeds,
+                                               encoder_attention_mask=image_atts,
+                                               labels=mask_labels,
+                                               return_dict=True,
+                                               output_hidden_states=True,
+                                               task='mlm'
+                                               )
+        loss += decoder_output_mlm.loss
 
-            decoder_output_lm = self.text_decoder(lm_input_ids,
-                                                  attention_mask=text.attention_mask,
-                                                  encoder_hidden_states=image_embeds,
-                                                  encoder_attention_mask=image_atts,
-                                                  labels=lm_labels,
-                                                  return_dict=True,
-                                                  output_hidden_states=True,
-                                                  task='lm'
-                                                  )
-            loss += decoder_output_lm.loss
-
-        if task in ['mlm', 'mlmlm']:
-            mlm_input_ids = text.input_ids.clone()
-            mlm_labels = mlm_input_ids.clone()
-            mlm_probability = 0.4
-
-            probability_matrix = torch.full(mlm_labels.shape, mlm_probability)
-            mlm_input_ids, mlm_labels = self.attr_mask(mlm_input_ids, token,device=image_embeds.device,
-                                              targets=mlm_labels, probability_matrix=probability_matrix)
-            decoder_output_mlm = self.text_decoder(mlm_input_ids,
-                                                   attention_mask=text.attention_mask,
-                                                   encoder_hidden_states=image_embeds,
-                                                   encoder_attention_mask=image_atts,
-                                                   labels=mlm_labels,
-                                                   return_dict=True,
-                                                   output_hidden_states=True,
-                                                   task='mlm'
-                                                   )
-            loss += decoder_output_mlm.loss
-
-        if task == 'attr':
-            mlm_input_ids = text.input_ids.clone()
-            mlm_labels = mlm_input_ids.clone()
-            mlm_probability = 0.4
-
-            probability_matrix = torch.full(mlm_labels.shape, mlm_probability)
-            mlm_input_ids, mlm_labels = self.attr_mask(mlm_input_ids, token,
-                                                       targets=mlm_labels, probability_matrix=probability_matrix)
-
-            decoder_output_mlm = self.text_decoder(mlm_input_ids,
-                                                   attention_mask=text.attention_mask,
-                                                   encoder_hidden_states=image_embeds,
-                                                   encoder_attention_mask=image_atts,
-                                                   labels=mlm_labels,
-                                                   return_dict=True,
-                                                   output_hidden_states=True,
-                                                   task='mlm'
-                                                   )
-            loss += decoder_output_mlm.loss
 
         return loss
-
-    def mask(self, input_ids, vocab_size, device, targets=None, masked_indices=None, probability_matrix=None):
-        if masked_indices is None:
-            masked_indices = torch.bernoulli(probability_matrix).bool()
-
-        masked_indices[input_ids == self.tokenizer.pad_token_id] = False
-        masked_indices[input_ids == self.tokenizer.cls_token_id] = False
-
-        if targets is not None:
-            targets[~masked_indices] = -100  # We only compute loss on masked tokens
-
-        # 80% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
-        indices_replaced = torch.bernoulli(torch.full(input_ids.shape, 0.8)).bool() & masked_indices
-        input_ids[indices_replaced] = self.tokenizer.mask_token_id
-
-        # 10% of the time, we replace masked input tokens with random word
-        indices_random = torch.bernoulli(torch.full(input_ids.shape, 0.5)).bool() & masked_indices & ~indices_replaced
-        random_words = torch.randint(vocab_size, input_ids.shape, dtype=torch.long).to(device)
-        input_ids[indices_random] = random_words[indices_random]
-        # The rest of the time (10% of the time) we keep the masked input tokens unchanged
-
-        if targets is not None:
-            return input_ids, targets
-        else:
-            return input_ids
-
-    def mask_irr(self, input_ids, vocab_size, device, targets=None, masked_indices=None, probability_matrix=None):
-        if masked_indices is None:
-            masked_indices = torch.bernoulli(probability_matrix).bool()
-
-        masked_indices[input_ids == self.tokenizer.pad_token_id] = False
-        masked_indices[input_ids == self.tokenizer.cls_token_id] = False
-
-        if targets is not None:
-            targets[~masked_indices] = 0  # We only compute loss on masked tokens
-
-        # 80% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
-        indices_replaced = torch.bernoulli(torch.full(input_ids.shape, 0.8)).bool() & masked_indices
-        input_ids[indices_replaced] = self.tokenizer.mask_token_id
-
-        # 10% of the time, we replace masked input tokens with random word
-        indices_random = torch.bernoulli(torch.full(input_ids.shape, 0.5)).bool() & masked_indices & ~indices_replaced
-        random_words = torch.randint(vocab_size, input_ids.shape, dtype=torch.long).to(device)
-        input_ids[indices_random] = random_words[indices_random]
-        # The rest of the time (10% of the time) we keep the masked input tokens unchanged
-
-        if targets is not None:
-            return input_ids, targets
-        else:
-            return input_ids
-
 
     def attr_mask(self, input_ids, tokens, targets=None, masked_indices=None, probability_matrix=None):
         phrase = False
@@ -408,21 +253,21 @@ class BLIP_CLIP(nn.Module):
                         else:
                             attr_tag = attr_tag + 1
                             in_attr = True
-                        if j < mask_pos.shape[1] - 1:
+                        if j < min(mask_pos.shape[1] - 1, 70):
                             mask_pos[i, j + 1] = attr_tag
                     else:
                         in_attr = False
                 probability = torch.cat([torch.zeros(1), torch.ones(attr_tag) * 0.8])
                 masked_attr = torch.bernoulli(probability)
-                for j in range(mask_pos.shape[1]):
+                for j in range(min(mask_pos.shape[1], 70)):
                     mask_pos[i, j] = masked_attr[int(mask_pos[i, j])]
             if masked_indices is None:
                 masked_indices = mask_pos.bool()
         else:
-            for i,tok in enumerate(tokens):
-                for j,pos in enumerate(nltk.pos_tag(tok),start=1):
-                    if pos[1] not in ['JJ','NN','NNS','NNP','NNPS']:
-                            probability_matrix[i,j] = 0
+            for i, tok in enumerate(tokens):
+                for j, pos in enumerate(nltk.pos_tag(tok), start=1):
+                    if pos[1] not in ['JJ', 'NN', 'NNS', 'NNP', 'NNPS'] and j < 72:
+                        probability_matrix[i, j] = 0
             if masked_indices is None:
                 masked_indices = torch.bernoulli(probability_matrix).bool()
 

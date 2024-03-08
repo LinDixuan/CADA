@@ -1,9 +1,9 @@
-image_root: '../datasets/ICFG-PEDES/imgs/'
+image_root: './datasets/ICFG-PEDES/imgs/'
 ann_root: 'annotation'
 dataset: 'retrieval_icfg'
 
 # set pretrained as a file path or an url
-pretrained: '../checkpoint/model_base.pth'
+pretrained: 'checkpoint/model_base.pth'
 
 # size of vit model; base or large
 

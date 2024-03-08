@@ -8,7 +8,7 @@ from PIL import Image
 from data.utils import pre_caption
 
 def split_RSTP_PEDE():
-    root_dir = '/home/dixuan/program/MHA/datasets/RSTPReid'
+    root_dir = '/workspace/MHA/datasets/RSTPReid'
     raw_dir = 'data_captions.json'
 
     with open(os.path.join(root_dir, raw_dir), 'r') as f:

@@ -9,7 +9,7 @@ from data.utils import pre_caption
 
 
 def split_CUHK_PEDE():
-    root_dir = '/home/dixuan/program/MHA/datasets/CUHK-PEDES'
+    root_dir = '/workspace/MHA/datasets/CUHK-PEDES'
     raw_dir = 'reid_raw.json'
     all_dir = 'caption_all.json'
 
@@ -59,7 +59,7 @@ def split_CUHK_PEDE():
 
 
 def split_ICFG_PEDE():
-    root_dir = '/home/dixuan/program/MHA/datasets/ICFG-PEDES'
+    root_dir = '/workspace/MHA/datasets/ICFG-PEDES'
     raw_dir = 'split.json'
 
     with open(os.path.join(root_dir, raw_dir), 'r') as f:
@@ -77,8 +77,8 @@ class mix_pede_train(Dataset):
         image_root (string): Root directory of images (e.g. coco/images/)
         ann_root (string): directory to store the annotation file
         '''
-        cuhk_path = '/home/dixuan/program/MHA/datasets/CUHK-PEDES/imgs'
-        icfg_path = '/home/dixuan/program/MHA/datasets/ICFG-PEDES/'
+        cuhk_path = '/workspace/MHA/datasets/CUHK-PEDES/imgs'
+        icfg_path = '/workspace/MHA/datasets/ICFG-PEDES/'
         train_list, _, _ = split_CUHK_PEDE()
         self.annotation = train_list
         self.transform = transform
@@ -291,5 +291,4 @@ class cuhk_pede_trainset_eval(Dataset):
 
 
 if __name__ == '__main__':
-    eva = cuhk_pede_train('','/home/dixuan/program/BLIP/datasets/CUHK-PEDES/imgs')
-    print(eva.img_ids)
+    pass

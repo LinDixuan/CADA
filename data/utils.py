@@ -7,7 +7,7 @@ import torch.distributed as dist
 
 import utils
 
-def pre_caption(caption,max_words=50):
+def pre_caption(caption,max_words=72):
     caption = re.sub(
         r"([.!\"()*#:;~])",       
         ' ',
@@ -28,7 +28,7 @@ def pre_caption(caption,max_words=50):
             
     return caption
 
-def pre_question(question,max_ques_words=50):
+def pre_question(question,max_ques_words=72):
     question = re.sub(
         r"([.!\"()*#:;~])",
         '',

@@ -8,7 +8,7 @@ from PIL import Image
 from data.utils import pre_caption
 
 def split_ICFG_PEDE():
-    root_dir = '/home/dixuan/program/MHA/datasets/ICFG-PEDES'
+    root_dir = '/workspace/MHA/datasets/ICFG-PEDES'
     raw_dir = 'ICFG-PEDES.json'
 
     with open(os.path.join(root_dir, raw_dir), 'r') as f:
@@ -30,52 +30,6 @@ def split_ICFG_PEDE():
         val_list = test_list.copy()
     return train_list,  val_list, test_list
 
-"""class icfg_pede_train(Dataset):
-    def __init__(self, transform, image_root, max_words=60, prompt=''):
-
-        train_list, _, _= split_ICFG_PEDE()
-        self.annotation = train_list
-        self.transform = transform
-        self.image_root = image_root
-        self.max_words = max_words
-        self.prompt = prompt
-        self.aug_list = []
-        self.p2img = {}
-        self.img_ids = {}
-        n = 0
-        for i,ann in enumerate(self.annotation):
-            pid = ann['id']
-            if pid not in self.img_ids.keys():
-                self.img_ids[pid] = n
-                self.p2img[n] = [i]
-                n += 1
-            else:
-                self.p2img[n-1].append(i)
-
-        for i,ann in enumerate(self.annotation):
-            pid = ann['id']
-            id = self.img_ids[pid]
-            self.aug_list.append(ann)
-            p_group = self.p2img[id].copy()
-            p_group.remove(i)
-            p_group = random.sample(p_group,min(len(p_group),2))
-
-            for ids in p_group:
-                aug_ann = ann.copy()
-                aug_ann['captions'][0] = self.annotation[ids]['captions'][0]
-                self.aug_list.append(aug_ann)
-
-    def __len__(self):
-        return len(self.aug_list)
-
-    def __getitem__(self, index):
-        ann = self.aug_list[index]
-        image_path = ann['file_path']
-        image = Image.open(os.path.join(self.image_root,image_path))
-        image = self.transform(image)
-        captions = ann['captions'][0]
-        captions = self.prompt + pre_caption(captions, self.max_words)
-        return image, captions, self.img_ids[ann['id']]"""
 
 class icfg_pede_train(Dataset):
     def __init__(self, transform, image_root, max_words=72, prompt=''):

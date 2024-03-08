@@ -20,29 +20,80 @@ Finally, we learn the dual associations between texts and images, and the experi
 
 ### Getting started
 
-- Clone this repo
+Clone this repo
 
 ```
 git clone https://github.com/LinDixuan/CADA.git
 ```
 
-- Install dependencies
+Install dependencies
 
 ```
 pip install -r requirements.txt
 ```
 
-- download pretrained baseline from [model_base](https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model_base.pth ) and put **model_base.pth** at **./checkpoints**
+Any components in NLTK can be found [here](https://github.com/nltk/nltk_data/tree/gh-pages).
 
-- Training
+
+
+### Prepare pretrained model
+
+Download pretrained baseline from [model_base](https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model_base.pth ) from [BLIP](https://github.com/salesforce/BLIP) and put **model_base.pth** at **./checkpoint**
+
+
+
+### Prepare datasets
+
+Download datasets: [CUHK-PEDES](https://github.com/ShuangLI59/Person-Search-with-Natural-Language-Description)   [ICFG-PEDES](https://github.com/ShuangLI59/Person-Search-with-Natural-Language-Description)  [RSTPReid](https://github.com/NjtechCVLab/RSTPReid-Dataset) and put at **./datasets**
+
+The files shall be organized as:
+
+```
+|---configs
+|---data
+|---models
+|---datasets
+|	---CUHK-PEDES
+|	---ICFG-PEDES
+|	---RSTPReid
+|---checkpoint
+|	---model_base.pth
+|
+|
+```
+
+
+
+### Train
 
 ```
 bash train.bash
 ```
 
-- Evaluating
+
+
+If you have problem in downloading pretrained BERT models here:
+
+```
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+```
+
+you may manually download it from [hugging face](https://huggingface.co/docs/transformers/model_doc/bert#bert) and use this instead:
+
+```
+tokenizer = BertTokenizer.from_pretrained(bert_localpath)
+```
+
+
+
+### Evaluation
 
 ```
 bash eval.bash
 ```
 
+
+
+### Acknowledgments
+
+Sincerely appreciate the contributions of [BLIP](https://github.com/salesforce/BLIP), [NLTK](https://github.com/nltk/nltk_data/tree/gh-pages), and [IRRA](https://github.com/anosorae/IRRA), for we used codes and pretrained models from these previous works.
