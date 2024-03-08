@@ -1,6 +1,6 @@
 # Cross-Modal Adaptive Dual Association for Text-to-Image Person Retrieval
 
-![main](model.png)
+![main](doc/model.png)
 
 
 
