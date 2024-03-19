@@ -103,9 +103,9 @@ class CADA(nn.Module):
         logits_per_text = logits_per_image.t()
 
         loss_i = F.softmax(logits_per_image,dim=1) * (F.log_softmax(logits_per_image, dim=1) - torch.log(labels + epsilon)) + \
-                 labels * (torch.log(labels + epsilon) - F.log_softmax(logits_per_image, dim=1))
+                 labels * (torch.log(labels + epsilon) - F.log_softmax(logits_per_image, dim=1)) + F.cross_entropy(logits_per_image, labels)
         loss_t = F.softmax(logits_per_text,dim=1) * (F.log_softmax(logits_per_text, dim=1) - torch.log(labels + epsilon)) + \
-                 labels * (torch.log(labels + epsilon) - F.log_softmax(logits_per_text, dim=1))
+                 labels * (torch.log(labels + epsilon) - F.log_softmax(logits_per_text, dim=1)) + F.cross_entropy(logits_per_text, labels)
         loss = (loss_i.mean() + loss_t.mean()) / 2
 
 
