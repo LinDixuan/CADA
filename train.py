@@ -281,7 +281,7 @@ def main(args, config):
             test_result = itm_eval(score_test_t2i, test_loader.dataset.txt2img,
                                    test_loader.dataset.img2txt, test_loader.dataset.img2pid,
                                    test_loader.dataset.txt2pid)
-            test_glb_result = itm_eval(score_test_glb_i2t, score_test_glb_t2i, test_loader.dataset.txt2img,
+            test_glb_result = itm_eval(score_test_glb_t2i, test_loader.dataset.txt2img,
                                        test_loader.dataset.img2txt, test_loader.dataset.img2pid,
                                        test_loader.dataset.txt2pid)
             print(test_result)
