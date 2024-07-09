@@ -40,7 +40,8 @@ Any components in NLTK can be found [here](https://github.com/nltk/nltk_data/tre
 
 Download pretrained baseline from [model_base](https://storage.googleapis.com/sfr-vision-language-research/BLIP/models/model_base.pth ) from [BLIP](https://github.com/salesforce/BLIP) and put **model_base.pth** at **./checkpoint**
 
-
+You can also download our checkpoints trained on CUHK and ICFG: [cuhk_best.pth](https://drive.google.com/file/d/1MUuo21WnIIR8kkC0r3IHpmn6Y_SOtglQ/view?usp=sharing)
+, [icfg_best.pth](https://drive.google.com/file/d/1n8wboh6CmN2bSRwE1YaQ2Nhnq-ObqACX/view?usp=drive_link)
 
 ### Prepare datasets
 
